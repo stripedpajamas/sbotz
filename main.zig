@@ -31,10 +31,12 @@ pub fn main() !void {
     var hello_msg = try session.hello();
     var written = try writer.write(hello_msg);
 
-    std.log.info("{} bytes written\n", .{written});
-
     var server_hello = try allocator.alloc(u8, 64);
     try reader.readNoEof(server_hello);
 
-    std.log.info("response: {x}\n", .{server_hello});
+    var valid_hello = session.verify_hello(server_hello);
+    if (!valid_hello) {
+        std.log.err("received invalid hello\n", .{});
+        return;
+    }
 }

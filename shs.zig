@@ -104,6 +104,16 @@ pub const HandshakeClient = struct {
 
             return out;
         }
+
+        pub fn verify_hello(session: *Session, msg: []const u8) bool {
+            const rec_auth_tag = msg[0..32];
+            const remote_eph_pk = msg[32..];
+
+            var auth_tag: [Hmac.mac_length]u8 = undefined;
+            Hmac.create(&auth_tag, remote_eph_pk, &session.client.opts.network_id);
+
+            return mem.eql(u8, rec_auth_tag, auth_tag[0..32]);
+        }
     };
 
     pub fn newSession(self: *HandshakeClient) !Session {
