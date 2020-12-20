@@ -141,8 +141,11 @@ pub const HandshakeClient = struct {
 
             // save the remote eph pk and compute shared secrets
             mem.copy(u8, &session.remote_eph_pk, remote_eph_pk);
-
             session.shared_secret_ab = try crypto.dh.X25519.scalarmult(session.eph_keypair.secret_key, session.remote_eph_pk);
+
+            // second shared secret requires converting server pk into x25519
+            var remote_pk_x25519 = try crypto.dh.X25519.publicKeyFromEd25519(session.remote_pk);
+            session.shared_secret_aB = try crypto.dh.X25519.scalarmult(session.eph_keypair.secret_key, remote_pk_x25519);
 
             return valid;
         }
