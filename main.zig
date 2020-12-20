@@ -13,10 +13,10 @@ const network_id = [_]u8{
 
 pub fn main() !void {
     var allocator = std.testing.allocator;
-    var keypair = try shs.loadKeypair(allocator);
+    var keyfile = try shs.loadKeyfile(allocator);
 
     var client = HandshakeClient.init(allocator, .{
-        .keypair = keypair.?,
+        .keypair = keyfile.keypair,
         .network_id = network_id,
     });
 
@@ -26,7 +26,7 @@ pub fn main() !void {
     var writer = conn.writer();
     var reader = conn.reader();
 
-    var session = try client.newSession();
+    var session = try client.newSession(keyfile.keypair.public_key);
 
     var hello_msg = try session.hello();
     var written = try writer.write(hello_msg);
@@ -34,9 +34,9 @@ pub fn main() !void {
     var server_hello = try allocator.alloc(u8, 64);
     try reader.readNoEof(server_hello);
 
-    var valid_hello = session.verify_hello(server_hello);
+    var valid_hello = try session.verify_hello(server_hello);
     if (!valid_hello) {
-        std.log.err("received invalid hello\n", .{});
+        std.log.err("received invalid hello (wrong net id?)\n", .{});
         return;
     }
 }
