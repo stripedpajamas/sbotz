@@ -105,6 +105,7 @@ pub const HandshakeClient = struct {
         shared_secret_ab_hash: [32]u8,
         shared_secret_aB: [32]u8,
         shared_secret_Ab: [32]u8,
+        sig_A: [64]u8,
 
         pub const hello_len: usize = 64;
 
@@ -120,7 +121,8 @@ pub const HandshakeClient = struct {
             mem.copy(u8, out[out.len - session.eph_keypair.public_key.len ..], &session.eph_keypair.public_key);
         }
 
-        pub fn verify_hello(session: *Session, msg: []const u8) !bool {
+        pub fn verifyHello(session: *Session, msg: []const u8) !bool {
+            std.debug.assert(msg.len == 64);
             // concat(
             //   nacl_auth(
             //     msg: server_ephemeral_pk,
@@ -149,6 +151,10 @@ pub const HandshakeClient = struct {
             var remote_pk_x25519 = try crypto.dh.X25519.publicKeyFromEd25519(session.remote_pk);
             session.shared_secret_aB = try crypto.dh.X25519.scalarmult(session.eph_keypair.secret_key, remote_pk_x25519);
 
+            // third shared secret requires converting our own sk into x25519
+            var local_keypair_x25519 = try crypto.dh.X25519.KeyPair.fromEd25519(session.client.opts.keypair);
+            session.shared_secret_Ab = try crypto.dh.X25519.scalarmult(local_keypair_x25519.secret_key, session.remote_eph_pk);
+
             return valid;
         }
 
@@ -166,7 +172,9 @@ pub const HandshakeClient = struct {
             mem.copy(u8, sig_payload[0..], &session.client.opts.network_id);
             mem.copy(u8, sig_payload[32..], &session.remote_pk);
             mem.copy(u8, sig_payload[64..], &session.shared_secret_ab_hash);
+
             const sig = try crypto.sign.Ed25519.sign(&sig_payload, session.client.opts.keypair, null);
+            mem.copy(u8, &session.sig_A, &sig);
 
             // nacl_secret_box(
             //   msg: concat(
@@ -196,6 +204,54 @@ pub const HandshakeClient = struct {
 
             crypto.nacl.SecretBox.seal(out[0..], &msg, nonce, key);
         }
+
+        pub fn verifyAuth(session: *Session, msg: []const u8) !bool {
+            std.debug.assert(msg.len == 80);
+
+            // detached_signature_B = assert_nacl_secretbox_open(
+            //   ciphertext: msg4,
+            //   nonce: 24_bytes_of_zeros,
+            //   key: sha256(
+            //     concat(
+            //       network_identifier,
+            //       shared_secret_ab,
+            //       shared_secret_aB,
+            //       shared_secret_Ab
+            //     )
+            //   )
+            // )
+            var key_payload: [128]u8 = undefined;
+            var key: [32]u8 = undefined;
+            mem.copy(u8, key_payload[0..], &session.client.opts.network_id);
+            mem.copy(u8, key_payload[32..], &session.shared_secret_ab);
+            mem.copy(u8, key_payload[64..], &session.shared_secret_aB);
+            mem.copy(u8, key_payload[96..], &session.shared_secret_Ab);
+            crypto.hash.sha2.Sha256.hash(&key_payload, &key, .{});
+
+            const nonce: [24]u8 = [_]u8{0x00} ** 24;
+            var sig: [64]u8 = undefined;
+            try crypto.nacl.SecretBox.open(&sig, msg, nonce, key);
+
+            // assert_nacl_sign_verify_detached(
+            //   sig: detached_signature_B,
+            //   msg: concat(
+            //     network_identifier,
+            //     detached_signature_A,
+            //     client_longterm_pk,
+            //     sha256(shared_secret_ab)
+            //   ),
+            //   key: server_longterm_pk
+            // )
+
+            var msg_payload: [160]u8 = undefined;
+            mem.copy(u8, msg_payload[0..], &session.client.opts.network_id);
+            mem.copy(u8, msg_payload[32..], &session.sig_A);
+            mem.copy(u8, msg_payload[96..], &session.client.opts.keypair.public_key);
+            mem.copy(u8, msg_payload[128..], &session.shared_secret_ab_hash);
+            try crypto.sign.Ed25519.verify(sig, &msg_payload, session.remote_pk);
+
+            return true;
+        }
     };
 
     pub fn newSession(self: *HandshakeClient, remote_pk: [32]u8) !Session {
@@ -211,6 +267,7 @@ pub const HandshakeClient = struct {
             .shared_secret_ab_hash = undefined,
             .shared_secret_aB = undefined,
             .shared_secret_Ab = undefined,
+            .sig_A = undefined,
         };
     }
 };

@@ -35,7 +35,7 @@ pub fn main() !void {
     var server_hello: [64]u8 = undefined;
     try reader.readNoEof(&server_hello);
 
-    var valid_hello = try session.verify_hello(&server_hello);
+    var valid_hello = try session.verifyHello(&server_hello);
     if (!valid_hello) {
         std.log.err("received invalid hello (wrong net id?)\n", .{});
         return;
@@ -48,5 +48,9 @@ pub fn main() !void {
     var server_auth: [80]u8 = undefined;
     try reader.readNoEof(&server_auth);
 
-    std.log.info("{x}\n", .{server_auth});
+    var valid_auth = try session.verifyAuth(&server_auth);
+    if (!valid_auth) {
+        std.log.err("received invalid auth\n", .{});
+        return;
+    }
 }
