@@ -87,12 +87,10 @@ pub const HandshakeOptions = struct {
 };
 
 pub const HandshakeClient = struct {
-    allocator: *mem.Allocator,
     opts: HandshakeOptions,
 
-    pub fn init(allocator: *mem.Allocator, opts: HandshakeOptions) HandshakeClient {
+    pub fn init(opts: HandshakeOptions) HandshakeClient {
         return HandshakeClient{
-            .allocator = allocator,
             .opts = opts,
         };
     }
@@ -104,12 +102,13 @@ pub const HandshakeClient = struct {
 
         remote_eph_pk: [32]u8,
         shared_secret_ab: [32]u8,
+        shared_secret_ab_hash: [32]u8,
         shared_secret_aB: [32]u8,
         shared_secret_Ab: [32]u8,
 
         pub const hello_len: usize = 64;
 
-        pub fn hello(session: *Session) ![]const u8 {
+        pub fn hello(session: *Session, out: *[64]u8) void {
             // concat(
             //   nacl_auth(
             //     msg: client_ephemeral_pk,
@@ -117,16 +116,18 @@ pub const HandshakeClient = struct {
             //   ),
             //   client_ephemeral_pk
             // )
-            var out = try session.client.allocator.alloc(u8, hello_len);
-            errdefer session.client.allocator.free(out);
-
             Hmac.create(out[0..Hmac.mac_length], &session.eph_keypair.public_key, &session.client.opts.network_id);
             mem.copy(u8, out[out.len - session.eph_keypair.public_key.len ..], &session.eph_keypair.public_key);
-
-            return out;
         }
 
         pub fn verify_hello(session: *Session, msg: []const u8) !bool {
+            // concat(
+            //   nacl_auth(
+            //     msg: server_ephemeral_pk,
+            //     key: network_identifier
+            //   ),
+            //   server_ephemeral_pk
+            // )
             const rec_auth_tag = msg[0..32];
             const remote_eph_pk = msg[32..];
 
@@ -142,6 +143,7 @@ pub const HandshakeClient = struct {
             // save the remote eph pk and compute shared secrets
             mem.copy(u8, &session.remote_eph_pk, remote_eph_pk);
             session.shared_secret_ab = try crypto.dh.X25519.scalarmult(session.eph_keypair.secret_key, session.remote_eph_pk);
+            crypto.hash.sha2.Sha256.hash(&session.shared_secret_ab, &session.shared_secret_ab_hash, .{});
 
             // second shared secret requires converting server pk into x25519
             var remote_pk_x25519 = try crypto.dh.X25519.publicKeyFromEd25519(session.remote_pk);
@@ -150,7 +152,50 @@ pub const HandshakeClient = struct {
             return valid;
         }
 
-        pub fn auth(session: *Session) []const u8 {}
+        pub fn auth(session: *Session, out: *[112]u8) !void {
+            // detached_signature_A = nacl_sign_detached(
+            //   msg: concat(
+            //     network_identifier,
+            //     server_longterm_pk,
+            //     sha256(shared_secret_ab)
+            //   ),
+            //   key: client_longterm_sk
+            // )
+            //
+            var sig_payload: [96]u8 = undefined;
+            mem.copy(u8, sig_payload[0..], &session.client.opts.network_id);
+            mem.copy(u8, sig_payload[32..], &session.remote_pk);
+            mem.copy(u8, sig_payload[64..], &session.shared_secret_ab_hash);
+            const sig = try crypto.sign.Ed25519.sign(&sig_payload, session.client.opts.keypair, null);
+
+            // nacl_secret_box(
+            //   msg: concat(
+            //     detached_signature_A,
+            //     client_longterm_pk
+            //   ),
+            //   nonce: 24_bytes_of_zeros,
+            //   key: sha256(
+            //     concat(
+            //       network_identifier,
+            //       shared_secret_ab,
+            //       shared_secret_aB
+            //     )
+            //   )
+            // )
+            var msg: [96]u8 = undefined;
+            mem.copy(u8, msg[0..], &sig);
+            mem.copy(u8, msg[64..], &session.client.opts.keypair.public_key);
+            const nonce: [24]u8 = [_]u8{0x00} ** 24;
+
+            var key_payload: [96]u8 = undefined;
+            var key: [32]u8 = undefined;
+            mem.copy(u8, key_payload[0..], &session.client.opts.network_id);
+            mem.copy(u8, key_payload[32..], &session.shared_secret_ab);
+            mem.copy(u8, key_payload[64..], &session.shared_secret_aB);
+            crypto.hash.sha2.Sha256.hash(&key_payload, &key, .{});
+
+            crypto.nacl.SecretBox.seal(out[0..], &msg, nonce, key);
+        }
     };
 
     pub fn newSession(self: *HandshakeClient, remote_pk: [32]u8) !Session {
@@ -163,12 +208,9 @@ pub const HandshakeClient = struct {
             .eph_keypair = eph_keypair,
             .remote_eph_pk = undefined,
             .shared_secret_ab = undefined,
+            .shared_secret_ab_hash = undefined,
             .shared_secret_aB = undefined,
             .shared_secret_Ab = undefined,
         };
-    }
-
-    pub fn whoami(self: *HandshakeClient) []const u8 {
-        return self.opts.keypair.public;
     }
 };

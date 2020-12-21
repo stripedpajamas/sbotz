@@ -15,7 +15,7 @@ pub fn main() !void {
     var allocator = std.testing.allocator;
     var keyfile = try shs.loadKeyfile(allocator);
 
-    var client = HandshakeClient.init(allocator, .{
+    var client = HandshakeClient.init(shs.HandshakeOptions{
         .keypair = keyfile.keypair,
         .network_id = network_id,
     });
@@ -28,15 +28,25 @@ pub fn main() !void {
 
     var session = try client.newSession(keyfile.keypair.public_key);
 
-    var hello_msg = try session.hello();
-    var written = try writer.write(hello_msg);
+    var hello_msg: [64]u8 = undefined;
+    session.hello(&hello_msg);
+    _ = try writer.write(&hello_msg);
 
-    var server_hello = try allocator.alloc(u8, 64);
-    try reader.readNoEof(server_hello);
+    var server_hello: [64]u8 = undefined;
+    try reader.readNoEof(&server_hello);
 
-    var valid_hello = try session.verify_hello(server_hello);
+    var valid_hello = try session.verify_hello(&server_hello);
     if (!valid_hello) {
         std.log.err("received invalid hello (wrong net id?)\n", .{});
         return;
     }
+
+    var auth_msg: [112]u8 = undefined;
+    try session.auth(&auth_msg);
+    _ = try writer.write(&auth_msg);
+
+    var server_auth: [80]u8 = undefined;
+    try reader.readNoEof(&server_auth);
+
+    std.log.info("{x}\n", .{server_auth});
 }
