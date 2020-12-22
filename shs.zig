@@ -1,86 +1,9 @@
 const std = @import("std");
+const fs = std.fs;
 const mem = std.mem;
 const crypto = std.crypto;
-const b64decoder = std.base64.standard_decoder;
 const Hmac = crypto.auth.hmac.sha2.HmacSha512;
 const assert = std.debug.assert;
-
-const Keyfile = struct {
-    id: []const u8,
-    keypair: crypto.sign.Ed25519.KeyPair,
-
-    pub fn parseKeyFile(allocator: *mem.Allocator, keyfile: []const u8) !Keyfile {
-        // remove all the bs comment lines (start with #)
-        var clean_file: [384]u8 = undefined;
-
-        var kf_idx: usize = 0;
-        var cf_idx: usize = 0;
-        var in_comment = false;
-        while (kf_idx < keyfile.len) : (kf_idx += 1) {
-            var char = keyfile[kf_idx];
-            if (char == '\n') {
-                in_comment = false;
-                continue;
-            }
-
-            if (char == '#') {
-                in_comment = true;
-                continue;
-            }
-
-            if (!in_comment) {
-                clean_file[cf_idx] = char;
-                cf_idx += 1;
-            }
-        }
-
-        // json parse the result
-        const FullKeyfile = struct {
-            id: []const u8,
-            curve: []const u8,
-            public: []const u8,
-            private: []const u8,
-        };
-        var json_stream = std.json.TokenStream.init(clean_file[0..cf_idx]);
-        const parsed_keyfile = try std.json.parse(FullKeyfile, &json_stream, .{
-            .allocator = allocator,
-        });
-
-        var keypair = crypto.sign.Ed25519.KeyPair{
-            .public_key = undefined,
-            .secret_key = undefined,
-        };
-
-        // keys are b64'd and have ".ed25519" on the end, so slice that off and decode
-        try b64decoder.decode(&keypair.public_key, parsed_keyfile.public[0 .. parsed_keyfile.public.len - 8]);
-        try b64decoder.decode(&keypair.secret_key, parsed_keyfile.private[0 .. parsed_keyfile.private.len - 8]);
-
-        return Keyfile{
-            .id = parsed_keyfile.id,
-            .keypair = keypair,
-        };
-    }
-};
-
-pub fn loadKeyfile(allocator: *mem.Allocator) !Keyfile {
-    const home_dir = if (std.os.getenv("HOME")) |home|
-        home
-    else
-        return error.FailedToLocateKeyfile;
-
-    const path_parts = &[_][]const u8{
-        home_dir,
-        ".ssb",
-    };
-
-    const path = try std.fs.path.join(allocator, path_parts);
-    defer allocator.free(path);
-
-    const dir = try std.fs.cwd().openDir(path, .{});
-    const keyfile_raw = try dir.readFileAlloc(allocator, "secret", 1024);
-
-    return try Keyfile.parseKeyFile(allocator, keyfile_raw);
-}
 
 pub const HandshakeOptions = struct {
     keypair: crypto.sign.Ed25519.KeyPair,
@@ -96,7 +19,7 @@ pub const HandshakeClient = struct {
         };
     }
 
-    const Session = struct {
+    pub const Session = struct {
         client: *HandshakeClient,
         eph_keypair: crypto.nacl.SealedBox.KeyPair,
         remote_pk: [32]u8,
@@ -353,7 +276,7 @@ pub const HandshakeClient = struct {
         // generate ephemeral keys for this session
         var eph_keypair = try crypto.nacl.SealedBox.KeyPair.create(null);
 
-        return Session{
+        var session = Session{
             .client = self,
             .remote_pk = remote_pk,
             .eph_keypair = eph_keypair,
@@ -368,6 +291,8 @@ pub const HandshakeClient = struct {
             .send_nonce = undefined,
             .recv_nonce = undefined,
         };
+
+        return session;
     }
 };
 
@@ -375,7 +300,7 @@ fn increment(buf: []u8) void {
     var idx: usize = 0;
     var byte: u16 = 1;
     while (idx < buf.len) : (idx += 1) {
-        byte = byte +% buf[idx];
+        byte += buf[idx];
         buf[idx] = @truncate(u8, byte);
         byte = byte >> 8;
     }
