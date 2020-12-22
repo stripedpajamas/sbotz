@@ -212,8 +212,8 @@ pub const HandshakeClient = struct {
             return true;
         }
 
-        // out must be 34 + msg.len in size
-        pub fn seal(session: *Session, msg: []const u8, out: []u8) void {
+        // out must be 34 + msg.len in size; returns the sealed payload size
+        pub fn seal(session: *Session, msg: []const u8, out: []u8) usize {
             assert(out.len >= msg.len + 34);
             assert(msg.len <= 4096);
 
@@ -230,12 +230,14 @@ pub const HandshakeClient = struct {
             // prepend the body length as 2-bytes, encrypt it (18-bytes),
             // and prepend it along with its own 16-byte auth tag
             // as the first 34-bytes in front of the original encrypted body
-            crypto.nacl.SecretBox.seal(out[18..], msg, body_nonce, session.send_key);
+            crypto.nacl.SecretBox.seal(out[18 .. 18 + msg.len + 16], msg, body_nonce, session.send_key);
             var tag: [18]u8 = undefined;
-            mem.writeIntBig(u16, tag[0..2], msg.len);
+            mem.writeIntBig(u16, tag[0..2], @truncate(u16, msg.len));
             mem.copy(u8, tag[2..], out[18..34]);
 
-            crypto.nacl.SecretBox.seal(out[0..34], tag, tag_nonce, session.send_key);
+            crypto.nacl.SecretBox.seal(out[0..34], &tag, tag_nonce, session.send_key);
+
+            return msg.len + 34;
         }
 
         pub fn openHeader(session: *Session, header: [34]u8) !MessageHeader {
@@ -244,31 +246,34 @@ pub const HandshakeClient = struct {
             increment(&session.recv_nonce);
 
             var out: [34]u8 = undefined;
-            try crypto.nacl.SecretBox.open(&out, tag, tag_nonce, session.recv_key);
+            try crypto.nacl.SecretBox.open(&out, &header, tag_nonce, session.recv_key);
 
-            var msg_len = mem.readIntBit(u16, out[0..2]);
+            var msg_len = mem.readIntBig(u16, out[0..2]);
 
-            var header = MessageHeader{
+            var parsed_header = MessageHeader{
                 .msg_len = msg_len,
                 .tag = undefined,
             };
 
-            mem.copy(u8, &tag, out);
-            return header;
+            mem.copy(u8, &parsed_header.tag, &out);
+            return parsed_header;
         }
 
-        // out must be at least body.len + 16
+        // out must be at least body.len
         pub fn openBody(session: *Session, header: MessageHeader, body: []const u8, out: []u8) !void {
-            assert(out.len >= body.len + 16);
+            assert(out.len >= body.len);
 
             var body_nonce: [24]u8 = undefined;
             mem.copy(u8, &body_nonce, &session.recv_nonce);
             increment(&session.recv_nonce);
 
-            mem.copy(u8, out[0..], &header.tag);
-            mem.copy(u8, out[16..], &body);
+            var body_and_tag: [4130]u8 = undefined;
+            mem.copy(u8, body_and_tag[0..], &header.tag);
+            mem.copy(u8, body_and_tag[16..], body);
 
-            try crypto.nacl.SecretBox.open(&out, out, body_nonce, session.recv_key);
+            var payload_len: usize = 16 + header.msg_len;
+
+            try crypto.nacl.SecretBox.open(out, body_and_tag[0..payload_len], body_nonce, session.recv_key);
         }
     };
 
