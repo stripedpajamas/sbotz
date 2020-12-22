@@ -3,6 +3,7 @@ const mem = std.mem;
 const crypto = std.crypto;
 const b64decoder = std.base64.standard_decoder;
 const Hmac = crypto.auth.hmac.sha2.HmacSha512;
+const assert = std.debug.assert;
 
 const Keyfile = struct {
     id: []const u8,
@@ -107,7 +108,15 @@ pub const HandshakeClient = struct {
         shared_secret_Ab: [32]u8,
         sig_A: [64]u8,
 
-        pub const hello_len: usize = 64;
+        send_key: [32]u8,
+        recv_key: [32]u8,
+        send_nonce: [24]u8,
+        recv_nonce: [24]u8,
+
+        const MessageHeader = struct {
+            msg_len: usize,
+            tag: [16]u8,
+        };
 
         pub fn hello(session: *Session, out: *[64]u8) void {
             // concat(
@@ -250,7 +259,93 @@ pub const HandshakeClient = struct {
             mem.copy(u8, msg_payload[128..], &session.shared_secret_ab_hash);
             try crypto.sign.Ed25519.verify(sig, &msg_payload, session.remote_pk);
 
+            // generate session keys and starting nonces for further communication
+            // send_key = sha256(sha256(sha256(net_id || ab || aB || Ab)) || remote_pk)
+            // recv_key = sha256(sha256(sha256(net_id || ab || aB || Ab)) || local_pk)
+            var key_internal: [128]u8 = undefined;
+            mem.copy(u8, key_internal[0..], &session.client.opts.network_id);
+            mem.copy(u8, key_internal[32..], &session.shared_secret_ab);
+            mem.copy(u8, key_internal[64..], &session.shared_secret_aB);
+            mem.copy(u8, key_internal[96..], &session.shared_secret_Ab);
+            crypto.hash.sha2.Sha256.hash(&key_internal, key_internal[0..32], .{});
+            crypto.hash.sha2.Sha256.hash(key_internal[0..32], key_internal[0..32], .{});
+
+            var send_key_internal: [64]u8 = undefined;
+            mem.copy(u8, send_key_internal[0..], key_internal[0..32]);
+            mem.copy(u8, send_key_internal[32..], &session.remote_pk);
+            crypto.hash.sha2.Sha256.hash(&send_key_internal, &session.send_key, .{});
+
+            var recv_key_internal: [64]u8 = undefined;
+            mem.copy(u8, recv_key_internal[0..], key_internal[0..32]);
+            mem.copy(u8, recv_key_internal[32..], &session.client.opts.keypair.public_key);
+            crypto.hash.sha2.Sha256.hash(&recv_key_internal, &session.recv_key, .{});
+
+            var nonce_hmac: [Hmac.mac_length]u8 = undefined;
+            Hmac.create(&nonce_hmac, &session.remote_eph_pk, &session.client.opts.network_id);
+            mem.copy(u8, &session.send_nonce, nonce_hmac[0..24]);
+
+            Hmac.create(&nonce_hmac, &session.eph_keypair.public_key, &session.client.opts.network_id);
+            mem.copy(u8, &session.recv_nonce, nonce_hmac[0..24]);
             return true;
+        }
+
+        // out must be 34 + msg.len in size
+        pub fn seal(session: *Session, msg: []const u8, out: []u8) void {
+            assert(out.len >= msg.len + 34);
+            assert(msg.len <= 4096);
+
+            var tag_nonce: [24]u8 = undefined;
+            var body_nonce: [24]u8 = undefined;
+
+            mem.copy(u8, &tag_nonce, &session.send_nonce);
+            increment(&session.send_nonce);
+            mem.copy(u8, &body_nonce, &session.send_nonce);
+            increment(&session.send_nonce);
+
+            // seal body into position 18 of out;
+            // we'll chop off the 16-byte auth tag,
+            // prepend the body length as 2-bytes, encrypt it (18-bytes),
+            // and prepend it along with its own 16-byte auth tag
+            // as the first 34-bytes in front of the original encrypted body
+            crypto.nacl.SecretBox.seal(out[18..], msg, body_nonce, session.send_key);
+            var tag: [18]u8 = undefined;
+            mem.writeIntBig(u16, tag[0..2], msg.len);
+            mem.copy(u8, tag[2..], out[18..34]);
+
+            crypto.nacl.SecretBox.seal(out[0..34], tag, tag_nonce, session.send_key);
+        }
+
+        pub fn openHeader(session: *Session, header: [34]u8) !MessageHeader {
+            var tag_nonce: [24]u8 = undefined;
+            mem.copy(u8, &tag_nonce, &session.recv_nonce);
+            increment(&session.recv_nonce);
+
+            var out: [34]u8 = undefined;
+            try crypto.nacl.SecretBox.open(&out, tag, tag_nonce, session.recv_key);
+
+            var msg_len = mem.readIntBit(u16, out[0..2]);
+
+            var header = MessageHeader{
+                .msg_len = msg_len,
+                .tag = undefined,
+            };
+
+            mem.copy(u8, &tag, out);
+            return header;
+        }
+
+        // out must be at least body.len + 16
+        pub fn openBody(session: *Session, header: MessageHeader, body: []const u8, out: []u8) !void {
+            assert(out.len >= body.len + 16);
+
+            var body_nonce: [24]u8 = undefined;
+            mem.copy(u8, &body_nonce, &session.recv_nonce);
+            increment(&session.recv_nonce);
+
+            mem.copy(u8, out[0..], &header.tag);
+            mem.copy(u8, out[16..], &body);
+
+            try crypto.nacl.SecretBox.open(&out, out, body_nonce, session.recv_key);
         }
     };
 
@@ -268,6 +363,48 @@ pub const HandshakeClient = struct {
             .shared_secret_aB = undefined,
             .shared_secret_Ab = undefined,
             .sig_A = undefined,
+            .send_key = undefined,
+            .recv_key = undefined,
+            .send_nonce = undefined,
+            .recv_nonce = undefined,
         };
     }
 };
+
+fn increment(buf: []u8) void {
+    var idx: usize = 0;
+    var byte: u16 = 1;
+    while (idx < buf.len) : (idx += 1) {
+        byte = byte +% buf[idx];
+        buf[idx] = @truncate(u8, byte);
+        byte = byte >> 8;
+    }
+}
+
+test "increment" {
+    const Test = struct {
+        input: []const u8,
+        expected: []const u8,
+    };
+    const test_cases = [_]Test{
+        Test{
+            .input = &[_]u8{0x00},
+            .expected = &[_]u8{0x01},
+        },
+        Test{
+            .input = &[_]u8{ 0xfe, 0xff },
+            .expected = &[_]u8{ 0xff, 0xff },
+        },
+        Test{
+            .input = &[_]u8{ 0xff, 0xff },
+            .expected = &[_]u8{ 0x00, 0x00 },
+        },
+    };
+
+    var buf: [24]u8 = undefined;
+    for (test_cases) |tc| {
+        mem.copy(u8, buf[0..], tc.input);
+        increment(buf[0..tc.input.len]);
+        std.testing.expectEqualSlices(u8, buf[0..tc.input.len], tc.expected);
+    }
+}
