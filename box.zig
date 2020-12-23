@@ -3,7 +3,7 @@ const shs = @import("./shs.zig");
 
 const fs = std.fs;
 const mem = std.mem;
-const HandshakeClient = shs.HandshakeClient;
+const crypto = std.crypto;
 
 const log = std.log.scoped(.box);
 
@@ -11,12 +11,12 @@ const HEADER_SIZE: usize = 34;
 const MAX_PAYLOAD_SIZE: usize = 4096;
 
 pub const BoxedConnection = struct {
-    session: *HandshakeClient.Session,
+    session: shs.Session,
     conn: fs.File,
 
     // orchestrates the handshake
-    pub fn new(hs_client: *HandshakeClient, conn: fs.File, remote_pk: [32]u8) !BoxedConnection {
-        var session = try hs_client.newSession(remote_pk);
+    pub fn new(opts: shs.HandshakeOptions, conn: fs.File, remote_pk: [32]u8) !BoxedConnection {
+        var session = try shs.newSession(opts, remote_pk);
         var writer = conn.writer();
         var reader = conn.reader();
 
@@ -41,7 +41,10 @@ pub const BoxedConnection = struct {
         log.info("sent {} byte auth msg", .{written});
 
         var server_auth: [80]u8 = undefined;
-        try reader.readNoEof(&server_auth);
+        reader.readNoEof(&server_auth) catch |err| {
+            std.log.err("incomplete auth msg returned; here's the buffer: {}", .{server_auth});
+            return err;
+        };
         log.info("received server auth msg", .{});
 
         var valid_auth = try session.verifyAuth(&server_auth);
@@ -53,7 +56,7 @@ pub const BoxedConnection = struct {
         log.info("handshake complete", .{});
 
         return BoxedConnection{
-            .session = &session,
+            .session = session,
             .conn = conn,
         };
     }
@@ -68,24 +71,29 @@ pub const BoxedConnection = struct {
             var chunk = if (idx + chunk_size >= payload.len) payload[idx..] else payload[idx .. idx + chunk_size];
             var enc_size = self.session.seal(chunk, &buf);
 
-            _ = try self.conn.write(buf[0..enc_size]);
+            var written = try self.conn.write(buf[0..enc_size]);
+            log.info("wrote {} byte payload", .{written});
         }
     }
 
-    // reads out next header and body in the connection stream; caller owns returned slice
-    pub fn readNextMessage(self: *BoxedConnection, allocator: *mem.Allocator) !?[]u8 {
+    // reads next header and body in the connection stream into out
+    // returns size of response
+    pub fn readNextBox(self: *BoxedConnection, out: []u8) !?usize {
         var header: [HEADER_SIZE]u8 = undefined;
         var reader = self.conn.reader();
 
         if (reader.readNoEof(&header)) |_| {
+            log.info("received box header", .{});
             var msg_header = try self.session.openHeader(header);
 
-            var body = try allocator.alloc(u8, msg_header.msg_len);
-            try reader.readNoEof(body);
+            log.info("opened box header; expecting {} byte body", .{msg_header.msg_len});
 
-            var dec_size = try self.session.openBody(msg_header, body, body);
+            var sized_out = out[0..msg_header.msg_len];
 
-            return body;
+            try reader.readNoEof(sized_out);
+            try self.session.openBody(msg_header, sized_out, sized_out);
+
+            return msg_header.msg_len;
         } else |err| switch (err) {
             error.EndOfStream => {
                 // no more messages

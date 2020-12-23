@@ -5,309 +5,306 @@ const crypto = std.crypto;
 const Hmac = crypto.auth.hmac.sha2.HmacSha512;
 const assert = std.debug.assert;
 
+const log = std.log.scoped(.shs);
+
 pub const HandshakeOptions = struct {
     keypair: crypto.sign.Ed25519.KeyPair,
     network_id: [32]u8,
 };
 
-pub const HandshakeClient = struct {
-    opts: HandshakeOptions,
+pub fn newSession(opts: HandshakeOptions, remote_pk: [32]u8) !Session {
+    // generate ephemeral keys for this session
+    var eph_keypair = try crypto.nacl.SealedBox.KeyPair.create(null);
 
-    pub fn init(opts: HandshakeOptions) HandshakeClient {
-        return HandshakeClient{
-            .opts = opts,
-        };
+    var session = Session{
+        .keypair = opts.keypair,
+        .network_id = opts.network_id,
+        .remote_pk = remote_pk,
+        .eph_keypair = eph_keypair,
+        .remote_eph_pk = undefined,
+        .shared_secret_ab = undefined,
+        .shared_secret_ab_hash = undefined,
+        .shared_secret_aB = undefined,
+        .shared_secret_Ab = undefined,
+        .sig_A = undefined,
+        .send_key = undefined,
+        .recv_key = undefined,
+        .send_nonce = undefined,
+        .recv_nonce = undefined,
+    };
+
+    return session;
+}
+
+pub const Session = struct {
+    keypair: crypto.sign.Ed25519.KeyPair,
+    network_id: [32]u8,
+
+    eph_keypair: crypto.nacl.SealedBox.KeyPair,
+    remote_pk: [32]u8,
+
+    remote_eph_pk: [32]u8,
+    shared_secret_ab: [32]u8,
+    shared_secret_ab_hash: [32]u8,
+    shared_secret_aB: [32]u8,
+    shared_secret_Ab: [32]u8,
+    sig_A: [64]u8,
+
+    send_key: [32]u8,
+    recv_key: [32]u8,
+    send_nonce: [24]u8,
+    recv_nonce: [24]u8,
+
+    const MessageHeader = struct {
+        msg_len: usize,
+        tag: [16]u8,
+    };
+
+    pub fn hello(session: *Session, out: *[64]u8) void {
+        // concat(
+        //   nacl_auth(
+        //     msg: client_ephemeral_pk,
+        //     key: network_identifier
+        //   ),
+        //   client_ephemeral_pk
+        // )
+        Hmac.create(out[0..Hmac.mac_length], &session.eph_keypair.public_key, &session.network_id);
+        mem.copy(u8, out[out.len - session.eph_keypair.public_key.len ..], &session.eph_keypair.public_key);
     }
 
-    pub const Session = struct {
-        client: *HandshakeClient,
-        eph_keypair: crypto.nacl.SealedBox.KeyPair,
-        remote_pk: [32]u8,
+    pub fn verifyHello(session: *Session, msg: []const u8) !bool {
+        std.debug.assert(msg.len == 64);
+        // concat(
+        //   nacl_auth(
+        //     msg: server_ephemeral_pk,
+        //     key: network_identifier
+        //   ),
+        //   server_ephemeral_pk
+        // )
+        const rec_auth_tag = msg[0..32];
+        const remote_eph_pk = msg[32..];
 
-        remote_eph_pk: [32]u8,
-        shared_secret_ab: [32]u8,
-        shared_secret_ab_hash: [32]u8,
-        shared_secret_aB: [32]u8,
-        shared_secret_Ab: [32]u8,
-        sig_A: [64]u8,
+        var auth_tag: [Hmac.mac_length]u8 = undefined;
+        Hmac.create(&auth_tag, remote_eph_pk, &session.network_id);
 
-        send_key: [32]u8,
-        recv_key: [32]u8,
-        send_nonce: [24]u8,
-        recv_nonce: [24]u8,
+        var valid = mem.eql(u8, rec_auth_tag, auth_tag[0..32]);
 
-        const MessageHeader = struct {
-            msg_len: usize,
-            tag: [16]u8,
-        };
-
-        pub fn hello(session: *Session, out: *[64]u8) void {
-            // concat(
-            //   nacl_auth(
-            //     msg: client_ephemeral_pk,
-            //     key: network_identifier
-            //   ),
-            //   client_ephemeral_pk
-            // )
-            Hmac.create(out[0..Hmac.mac_length], &session.eph_keypair.public_key, &session.client.opts.network_id);
-            mem.copy(u8, out[out.len - session.eph_keypair.public_key.len ..], &session.eph_keypair.public_key);
-        }
-
-        pub fn verifyHello(session: *Session, msg: []const u8) !bool {
-            std.debug.assert(msg.len == 64);
-            // concat(
-            //   nacl_auth(
-            //     msg: server_ephemeral_pk,
-            //     key: network_identifier
-            //   ),
-            //   server_ephemeral_pk
-            // )
-            const rec_auth_tag = msg[0..32];
-            const remote_eph_pk = msg[32..];
-
-            var auth_tag: [Hmac.mac_length]u8 = undefined;
-            Hmac.create(&auth_tag, remote_eph_pk, &session.client.opts.network_id);
-
-            var valid = mem.eql(u8, rec_auth_tag, auth_tag[0..32]);
-
-            if (!valid) {
-                return valid;
-            }
-
-            // save the remote eph pk and compute shared secrets
-            mem.copy(u8, &session.remote_eph_pk, remote_eph_pk);
-            session.shared_secret_ab = try crypto.dh.X25519.scalarmult(session.eph_keypair.secret_key, session.remote_eph_pk);
-            crypto.hash.sha2.Sha256.hash(&session.shared_secret_ab, &session.shared_secret_ab_hash, .{});
-
-            // second shared secret requires converting server pk into x25519
-            var remote_pk_x25519 = try crypto.dh.X25519.publicKeyFromEd25519(session.remote_pk);
-            session.shared_secret_aB = try crypto.dh.X25519.scalarmult(session.eph_keypair.secret_key, remote_pk_x25519);
-
-            // third shared secret requires converting our own sk into x25519
-            var local_keypair_x25519 = try crypto.dh.X25519.KeyPair.fromEd25519(session.client.opts.keypair);
-            session.shared_secret_Ab = try crypto.dh.X25519.scalarmult(local_keypair_x25519.secret_key, session.remote_eph_pk);
-
+        if (!valid) {
             return valid;
         }
 
-        pub fn auth(session: *Session, out: *[112]u8) !void {
-            // detached_signature_A = nacl_sign_detached(
-            //   msg: concat(
-            //     network_identifier,
-            //     server_longterm_pk,
-            //     sha256(shared_secret_ab)
-            //   ),
-            //   key: client_longterm_sk
-            // )
-            //
-            var sig_payload: [96]u8 = undefined;
-            mem.copy(u8, sig_payload[0..], &session.client.opts.network_id);
-            mem.copy(u8, sig_payload[32..], &session.remote_pk);
-            mem.copy(u8, sig_payload[64..], &session.shared_secret_ab_hash);
+        // save the remote eph pk and compute shared secrets
+        mem.copy(u8, &session.remote_eph_pk, remote_eph_pk);
+        session.shared_secret_ab = try crypto.dh.X25519.scalarmult(session.eph_keypair.secret_key, session.remote_eph_pk);
+        crypto.hash.sha2.Sha256.hash(&session.shared_secret_ab, &session.shared_secret_ab_hash, .{});
 
-            const sig = try crypto.sign.Ed25519.sign(&sig_payload, session.client.opts.keypair, null);
-            mem.copy(u8, &session.sig_A, &sig);
+        // second shared secret requires converting server pk into x25519
+        var remote_pk_x25519 = try crypto.dh.X25519.publicKeyFromEd25519(session.remote_pk);
+        session.shared_secret_aB = try crypto.dh.X25519.scalarmult(session.eph_keypair.secret_key, remote_pk_x25519);
 
-            // nacl_secret_box(
-            //   msg: concat(
-            //     detached_signature_A,
-            //     client_longterm_pk
-            //   ),
-            //   nonce: 24_bytes_of_zeros,
-            //   key: sha256(
-            //     concat(
-            //       network_identifier,
-            //       shared_secret_ab,
-            //       shared_secret_aB
-            //     )
-            //   )
-            // )
-            var msg: [96]u8 = undefined;
-            mem.copy(u8, msg[0..], &sig);
-            mem.copy(u8, msg[64..], &session.client.opts.keypair.public_key);
-            const nonce: [24]u8 = [_]u8{0x00} ** 24;
+        // third shared secret requires converting our own sk into x25519
+        var local_keypair_x25519 = try crypto.dh.X25519.KeyPair.fromEd25519(session.keypair);
+        session.shared_secret_Ab = try crypto.dh.X25519.scalarmult(local_keypair_x25519.secret_key, session.remote_eph_pk);
 
-            var key_payload: [96]u8 = undefined;
-            var key: [32]u8 = undefined;
-            mem.copy(u8, key_payload[0..], &session.client.opts.network_id);
-            mem.copy(u8, key_payload[32..], &session.shared_secret_ab);
-            mem.copy(u8, key_payload[64..], &session.shared_secret_aB);
-            crypto.hash.sha2.Sha256.hash(&key_payload, &key, .{});
+        return valid;
+    }
 
-            crypto.nacl.SecretBox.seal(out[0..], &msg, nonce, key);
-        }
+    pub fn auth(session: *Session, out: *[112]u8) !void {
+        // detached_signature_A = nacl_sign_detached(
+        //   msg: concat(
+        //     network_identifier,
+        //     server_longterm_pk,
+        //     sha256(shared_secret_ab)
+        //   ),
+        //   key: client_longterm_sk
+        // )
+        //
+        var sig_payload: [96]u8 = undefined;
+        mem.copy(u8, sig_payload[0..], &session.network_id);
+        mem.copy(u8, sig_payload[32..], &session.remote_pk);
+        mem.copy(u8, sig_payload[64..], &session.shared_secret_ab_hash);
 
-        pub fn verifyAuth(session: *Session, msg: []const u8) !bool {
-            std.debug.assert(msg.len == 80);
+        const sig = try crypto.sign.Ed25519.sign(&sig_payload, session.keypair, null);
+        mem.copy(u8, &session.sig_A, &sig);
 
-            // detached_signature_B = assert_nacl_secretbox_open(
-            //   ciphertext: msg4,
-            //   nonce: 24_bytes_of_zeros,
-            //   key: sha256(
-            //     concat(
-            //       network_identifier,
-            //       shared_secret_ab,
-            //       shared_secret_aB,
-            //       shared_secret_Ab
-            //     )
-            //   )
-            // )
-            var key_payload: [128]u8 = undefined;
-            var key: [32]u8 = undefined;
-            mem.copy(u8, key_payload[0..], &session.client.opts.network_id);
-            mem.copy(u8, key_payload[32..], &session.shared_secret_ab);
-            mem.copy(u8, key_payload[64..], &session.shared_secret_aB);
-            mem.copy(u8, key_payload[96..], &session.shared_secret_Ab);
-            crypto.hash.sha2.Sha256.hash(&key_payload, &key, .{});
+        // nacl_secret_box(
+        //   msg: concat(
+        //     detached_signature_A,
+        //     client_longterm_pk
+        //   ),
+        //   nonce: 24_bytes_of_zeros,
+        //   key: sha256(
+        //     concat(
+        //       network_identifier,
+        //       shared_secret_ab,
+        //       shared_secret_aB
+        //     )
+        //   )
+        // )
+        var msg: [96]u8 = undefined;
+        mem.copy(u8, msg[0..], &sig);
+        mem.copy(u8, msg[64..], &session.keypair.public_key);
+        const nonce: [24]u8 = [_]u8{0x00} ** 24;
 
-            const nonce: [24]u8 = [_]u8{0x00} ** 24;
-            var sig: [64]u8 = undefined;
-            try crypto.nacl.SecretBox.open(&sig, msg, nonce, key);
+        var key_payload: [96]u8 = undefined;
+        var key: [32]u8 = undefined;
+        mem.copy(u8, key_payload[0..], &session.network_id);
+        mem.copy(u8, key_payload[32..], &session.shared_secret_ab);
+        mem.copy(u8, key_payload[64..], &session.shared_secret_aB);
+        crypto.hash.sha2.Sha256.hash(&key_payload, &key, .{});
 
-            // assert_nacl_sign_verify_detached(
-            //   sig: detached_signature_B,
-            //   msg: concat(
-            //     network_identifier,
-            //     detached_signature_A,
-            //     client_longterm_pk,
-            //     sha256(shared_secret_ab)
-            //   ),
-            //   key: server_longterm_pk
-            // )
+        crypto.nacl.SecretBox.seal(out[0..], &msg, nonce, key);
+    }
 
-            var msg_payload: [160]u8 = undefined;
-            mem.copy(u8, msg_payload[0..], &session.client.opts.network_id);
-            mem.copy(u8, msg_payload[32..], &session.sig_A);
-            mem.copy(u8, msg_payload[96..], &session.client.opts.keypair.public_key);
-            mem.copy(u8, msg_payload[128..], &session.shared_secret_ab_hash);
-            try crypto.sign.Ed25519.verify(sig, &msg_payload, session.remote_pk);
+    pub fn verifyAuth(session: *Session, msg: []const u8) !bool {
+        std.debug.assert(msg.len == 80);
 
-            // generate session keys and starting nonces for further communication
-            // send_key = sha256(sha256(sha256(net_id || ab || aB || Ab)) || remote_pk)
-            // recv_key = sha256(sha256(sha256(net_id || ab || aB || Ab)) || local_pk)
-            var key_internal: [128]u8 = undefined;
-            mem.copy(u8, key_internal[0..], &session.client.opts.network_id);
-            mem.copy(u8, key_internal[32..], &session.shared_secret_ab);
-            mem.copy(u8, key_internal[64..], &session.shared_secret_aB);
-            mem.copy(u8, key_internal[96..], &session.shared_secret_Ab);
-            crypto.hash.sha2.Sha256.hash(&key_internal, key_internal[0..32], .{});
-            crypto.hash.sha2.Sha256.hash(key_internal[0..32], key_internal[0..32], .{});
+        // detached_signature_B = assert_nacl_secretbox_open(
+        //   ciphertext: msg4,
+        //   nonce: 24_bytes_of_zeros,
+        //   key: sha256(
+        //     concat(
+        //       network_identifier,
+        //       shared_secret_ab,
+        //       shared_secret_aB,
+        //       shared_secret_Ab
+        //     )
+        //   )
+        // )
+        var key_payload: [128]u8 = undefined;
+        var key: [32]u8 = undefined;
+        mem.copy(u8, key_payload[0..], &session.network_id);
+        mem.copy(u8, key_payload[32..], &session.shared_secret_ab);
+        mem.copy(u8, key_payload[64..], &session.shared_secret_aB);
+        mem.copy(u8, key_payload[96..], &session.shared_secret_Ab);
+        crypto.hash.sha2.Sha256.hash(&key_payload, &key, .{});
 
-            var send_key_internal: [64]u8 = undefined;
-            mem.copy(u8, send_key_internal[0..], key_internal[0..32]);
-            mem.copy(u8, send_key_internal[32..], &session.remote_pk);
-            crypto.hash.sha2.Sha256.hash(&send_key_internal, &session.send_key, .{});
+        const nonce: [24]u8 = [_]u8{0x00} ** 24;
+        var sig: [64]u8 = undefined;
+        try crypto.nacl.SecretBox.open(&sig, msg, nonce, key);
 
-            var recv_key_internal: [64]u8 = undefined;
-            mem.copy(u8, recv_key_internal[0..], key_internal[0..32]);
-            mem.copy(u8, recv_key_internal[32..], &session.client.opts.keypair.public_key);
-            crypto.hash.sha2.Sha256.hash(&recv_key_internal, &session.recv_key, .{});
+        // assert_nacl_sign_verify_detached(
+        //   sig: detached_signature_B,
+        //   msg: concat(
+        //     network_identifier,
+        //     detached_signature_A,
+        //     client_longterm_pk,
+        //     sha256(shared_secret_ab)
+        //   ),
+        //   key: server_longterm_pk
+        // )
 
-            var nonce_hmac: [Hmac.mac_length]u8 = undefined;
-            Hmac.create(&nonce_hmac, &session.remote_eph_pk, &session.client.opts.network_id);
-            mem.copy(u8, &session.send_nonce, nonce_hmac[0..24]);
+        var msg_payload: [160]u8 = undefined;
+        mem.copy(u8, msg_payload[0..], &session.network_id);
+        mem.copy(u8, msg_payload[32..], &session.sig_A);
+        mem.copy(u8, msg_payload[96..], &session.keypair.public_key);
+        mem.copy(u8, msg_payload[128..], &session.shared_secret_ab_hash);
+        try crypto.sign.Ed25519.verify(sig, &msg_payload, session.remote_pk);
 
-            Hmac.create(&nonce_hmac, &session.eph_keypair.public_key, &session.client.opts.network_id);
-            mem.copy(u8, &session.recv_nonce, nonce_hmac[0..24]);
-            return true;
-        }
+        // generate session keys and starting nonces for further communication
+        // send_key = sha256(sha256(sha256(net_id || ab || aB || Ab)) || remote_pk)
+        // recv_key = sha256(sha256(sha256(net_id || ab || aB || Ab)) || local_pk)
+        var key_internal: [128]u8 = undefined;
+        mem.copy(u8, key_internal[0..], &session.network_id);
+        mem.copy(u8, key_internal[32..], &session.shared_secret_ab);
+        mem.copy(u8, key_internal[64..], &session.shared_secret_aB);
+        mem.copy(u8, key_internal[96..], &session.shared_secret_Ab);
+        crypto.hash.sha2.Sha256.hash(&key_internal, key_internal[0..32], .{});
+        crypto.hash.sha2.Sha256.hash(key_internal[0..32], key_internal[0..32], .{});
 
-        // out must be 34 + msg.len in size; returns the sealed payload size
-        pub fn seal(session: *Session, msg: []const u8, out: []u8) usize {
-            assert(out.len >= msg.len + 34);
-            assert(msg.len <= 4096);
+        var send_key_internal: [64]u8 = undefined;
+        mem.copy(u8, send_key_internal[0..], key_internal[0..32]);
+        mem.copy(u8, send_key_internal[32..], &session.remote_pk);
+        crypto.hash.sha2.Sha256.hash(&send_key_internal, &session.send_key, .{});
 
-            var tag_nonce: [24]u8 = undefined;
-            var body_nonce: [24]u8 = undefined;
+        var recv_key_internal: [64]u8 = undefined;
+        mem.copy(u8, recv_key_internal[0..], key_internal[0..32]);
+        mem.copy(u8, recv_key_internal[32..], &session.keypair.public_key);
+        crypto.hash.sha2.Sha256.hash(&recv_key_internal, &session.recv_key, .{});
 
-            mem.copy(u8, &tag_nonce, &session.send_nonce);
-            increment(&session.send_nonce);
-            mem.copy(u8, &body_nonce, &session.send_nonce);
-            increment(&session.send_nonce);
+        var nonce_hmac: [Hmac.mac_length]u8 = undefined;
+        Hmac.create(&nonce_hmac, &session.remote_eph_pk, &session.network_id);
+        mem.copy(u8, &session.send_nonce, nonce_hmac[0..24]);
 
-            // seal body into position 18 of out;
-            // we'll chop off the 16-byte auth tag,
-            // prepend the body length as 2-bytes, encrypt it (18-bytes),
-            // and prepend it along with its own 16-byte auth tag
-            // as the first 34-bytes in front of the original encrypted body
-            crypto.nacl.SecretBox.seal(out[18 .. 18 + msg.len + 16], msg, body_nonce, session.send_key);
-            var tag: [18]u8 = undefined;
-            mem.writeIntBig(u16, tag[0..2], @truncate(u16, msg.len));
-            mem.copy(u8, tag[2..], out[18..34]);
+        Hmac.create(&nonce_hmac, &session.eph_keypair.public_key, &session.network_id);
+        mem.copy(u8, &session.recv_nonce, nonce_hmac[0..24]);
+        return true;
+    }
 
-            crypto.nacl.SecretBox.seal(out[0..34], &tag, tag_nonce, session.send_key);
+    // out must be 34 + msg.len in size; returns the sealed payload size
+    pub fn seal(session: *Session, msg: []const u8, out: []u8) usize {
+        assert(out.len >= msg.len + 34);
+        assert(msg.len <= 4096);
 
-            return msg.len + 34;
-        }
+        var tag_nonce: [24]u8 = undefined;
+        var body_nonce: [24]u8 = undefined;
 
-        pub fn openHeader(session: *Session, header: [34]u8) !MessageHeader {
-            var tag_nonce: [24]u8 = undefined;
-            mem.copy(u8, &tag_nonce, &session.recv_nonce);
-            increment(&session.recv_nonce);
+        mem.copy(u8, &tag_nonce, &session.send_nonce);
+        increment(&session.send_nonce);
+        mem.copy(u8, &body_nonce, &session.send_nonce);
+        increment(&session.send_nonce);
 
-            var out: [34]u8 = undefined;
-            try crypto.nacl.SecretBox.open(&out, &header, tag_nonce, session.recv_key);
+        // seal body into position 18 of out;
+        // we'll chop off the 16-byte auth tag,
+        // prepend the body length as 2-bytes, encrypt it (18-bytes),
+        // and prepend it along with its own 16-byte auth tag
+        // as the first 34-bytes in front of the original encrypted body
+        crypto.nacl.SecretBox.seal(out[18 .. 18 + msg.len + 16], msg, body_nonce, session.send_key);
+        var tag: [18]u8 = undefined;
+        mem.writeIntBig(u16, tag[0..2], @truncate(u16, msg.len));
+        mem.copy(u8, tag[2..], out[18..34]);
 
-            var msg_len = mem.readIntBig(u16, out[0..2]);
+        crypto.nacl.SecretBox.seal(out[0..34], &tag, tag_nonce, session.send_key);
 
-            var parsed_header = MessageHeader{
-                .msg_len = msg_len,
-                .tag = undefined,
-            };
+        return msg.len + 34;
+    }
 
-            mem.copy(u8, &parsed_header.tag, &out);
-            return parsed_header;
-        }
+    pub fn openHeader(session: *Session, header: [34]u8) !MessageHeader {
+        var tag_nonce: [24]u8 = undefined;
+        mem.copy(u8, &tag_nonce, &session.recv_nonce);
+        increment(&session.recv_nonce);
 
-        // out must be at least body.len
-        pub fn openBody(session: *Session, header: MessageHeader, body: []const u8, out: []u8) !void {
-            assert(out.len >= body.len);
+        var out: [18]u8 = undefined;
+        try crypto.nacl.SecretBox.open(&out, &header, tag_nonce, session.recv_key);
 
-            var body_nonce: [24]u8 = undefined;
-            mem.copy(u8, &body_nonce, &session.recv_nonce);
-            increment(&session.recv_nonce);
+        var msg_len = mem.readIntBig(u16, out[0..2]);
 
-            var body_and_tag: [4130]u8 = undefined;
-            mem.copy(u8, body_and_tag[0..], &header.tag);
-            mem.copy(u8, body_and_tag[16..], body);
-
-            var payload_len: usize = 16 + header.msg_len;
-
-            try crypto.nacl.SecretBox.open(out, body_and_tag[0..payload_len], body_nonce, session.recv_key);
-        }
-    };
-
-    pub fn newSession(self: *HandshakeClient, remote_pk: [32]u8) !Session {
-        // generate ephemeral keys for this session
-        var eph_keypair = try crypto.nacl.SealedBox.KeyPair.create(null);
-
-        var session = Session{
-            .client = self,
-            .remote_pk = remote_pk,
-            .eph_keypair = eph_keypair,
-            .remote_eph_pk = undefined,
-            .shared_secret_ab = undefined,
-            .shared_secret_ab_hash = undefined,
-            .shared_secret_aB = undefined,
-            .shared_secret_Ab = undefined,
-            .sig_A = undefined,
-            .send_key = undefined,
-            .recv_key = undefined,
-            .send_nonce = undefined,
-            .recv_nonce = undefined,
+        var parsed_header = MessageHeader{
+            .msg_len = msg_len,
+            .tag = undefined,
         };
 
-        return session;
+        mem.copy(u8, &parsed_header.tag, out[2..]);
+        return parsed_header;
+    }
+
+    // out must be at least body.len
+    pub fn openBody(session: *Session, header: MessageHeader, body: []const u8, out: []u8) !void {
+        assert(out.len >= body.len);
+
+        var body_nonce: [24]u8 = undefined;
+        mem.copy(u8, &body_nonce, &session.recv_nonce);
+        increment(&session.recv_nonce);
+
+        var body_and_tag: [4130]u8 = undefined;
+        mem.copy(u8, body_and_tag[0..], &header.tag);
+        mem.copy(u8, body_and_tag[16..], body);
+
+        var payload_len: usize = 16 + header.msg_len;
+
+        try crypto.nacl.SecretBox.open(out, body_and_tag[0..payload_len], body_nonce, session.recv_key);
     }
 };
 
+// increment buffer, treating it as a big endian int
 fn increment(buf: []u8) void {
-    var idx: usize = 0;
+    var idx: usize = buf.len - 1;
     var byte: u16 = 1;
-    while (idx < buf.len) : (idx += 1) {
+    while (idx >= 0) : (idx -= 1) {
         byte += buf[idx];
         buf[idx] = @truncate(u8, byte);
         byte = byte >> 8;
+        if (idx == 0) break;
     }
 }
 
@@ -322,7 +319,7 @@ test "increment" {
             .expected = &[_]u8{0x01},
         },
         Test{
-            .input = &[_]u8{ 0xfe, 0xff },
+            .input = &[_]u8{ 0xff, 0xfe },
             .expected = &[_]u8{ 0xff, 0xff },
         },
         Test{
