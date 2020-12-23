@@ -1,10 +1,11 @@
 const std = @import("std");
 const shs = @import("./shs.zig");
 const box = @import("./box.zig");
+const rpc = @import("./rpc.zig");
 const keys = @import("./keys.zig");
 
 const net = std.net;
-const BoxedConnection = box.BoxedConnection;
+const RPCConnection = rpc.RPCConnection;
 
 pub const log_level: std.log.Level = .info;
 
@@ -20,23 +21,19 @@ pub fn main() !void {
     var server_addr = try net.Address.parseIp4("127.0.0.1", 8008);
     var conn = try net.tcpConnectToAddress(server_addr);
 
-    var boxed_conn = try BoxedConnection.new(opts, conn, keyfile.keypair.public_key);
+    var rpc_conn = try RPCConnection.init(opts, conn, keyfile.keypair.public_key);
 
-    // TODO write some RPC translation layer
-    var payload: [256]u8 = undefined;
-    payload[0] = 0b00000010; // signifies we are dealing with json
-    // var request = "{\"name\":[\"createHistoryStream\"],\"type\":\"source\",\"args\":[{\"id\":\"@Ho4BoSabuGW6RBt7Gj1WDcBG60cLr5MyF1NDy4ardvg=.ed25519\"]}";
-    var request = "{\"name\":[\"whoami\"],\"type\":\"sync\",\"args\":[]}";
-    std.mem.writeIntBig(u32, payload[1..5], request.len); // write the body length
-    std.mem.writeIntBig(i32, payload[5..9], 100); // write the request number
-    std.mem.copy(u8, payload[9..], request); // write the request to the payload
+    var whoami_req = try RPCConnection.whoami(allocator);
+    var req = try RPCConnection.encode(allocator, whoami_req, 100, .{
+        .stream = false,
+        .end_err = false,
+        .body_type = RPCConnection.BodyType.JSON,
+    });
 
-    var to_send = payload[0 .. 9 + request.len];
-
-    try boxed_conn.write(to_send);
+    try rpc_conn.write(req);
 
     var response: [4096]u8 = undefined;
-    var res_size = try boxed_conn.readNextBox(&response);
+    var res_size = try rpc_conn.boxed_conn.readNextBox(&response);
 
     std.log.info("received {} byte box", .{res_size});
 
@@ -48,7 +45,7 @@ pub fn main() !void {
         std.log.info("req num: {}", .{std.mem.readIntBig(i32, res[5..9])});
     }
 
-    res_size = try boxed_conn.readNextBox(&response);
+    res_size = try rpc_conn.boxed_conn.readNextBox(&response);
 
     std.log.info("received {} byte box", .{res_size});
 

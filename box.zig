@@ -7,15 +7,15 @@ const crypto = std.crypto;
 
 const log = std.log.scoped(.box);
 
-const HEADER_SIZE: usize = 34;
-const MAX_PAYLOAD_SIZE: usize = 4096;
-
 pub const BoxedConnection = struct {
     session: shs.Session,
     conn: fs.File,
 
+    pub const header_size: usize = 34;
+    pub const max_payload_size: usize = 4096;
+
     // orchestrates the handshake
-    pub fn new(opts: shs.HandshakeOptions, conn: fs.File, remote_pk: [32]u8) !BoxedConnection {
+    pub fn init(opts: shs.HandshakeOptions, conn: fs.File, remote_pk: [32]u8) !BoxedConnection {
         var session = try shs.newSession(opts, remote_pk);
         var writer = conn.writer();
         var reader = conn.reader();
@@ -63,9 +63,9 @@ pub const BoxedConnection = struct {
 
     // splits up payload into 4096-byte chunks and sends them encrypted down the wire
     pub fn write(self: *BoxedConnection, payload: []const u8) !void {
-        var buf: [HEADER_SIZE + MAX_PAYLOAD_SIZE]u8 = undefined;
+        var buf: [header_size + max_payload_size]u8 = undefined;
 
-        var chunk_size = MAX_PAYLOAD_SIZE;
+        var chunk_size = max_payload_size;
         var idx: usize = 0;
         while (idx < payload.len) : (idx += chunk_size) {
             var chunk = if (idx + chunk_size >= payload.len) payload[idx..] else payload[idx .. idx + chunk_size];
@@ -79,7 +79,7 @@ pub const BoxedConnection = struct {
     // reads next header and body in the connection stream into out
     // returns size of response
     pub fn readNextBox(self: *BoxedConnection, out: []u8) !?usize {
-        var header: [HEADER_SIZE]u8 = undefined;
+        var header: [header_size]u8 = undefined;
         var reader = self.conn.reader();
 
         if (reader.readNoEof(&header)) |_| {
