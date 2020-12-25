@@ -155,47 +155,4 @@ pub fn RPCConnection(comptime ReaderWriterType: type) type {
             return self.conn.write(payload.items);
         }
     };
-    // // adds the rpc header to the cmd payload
-    // pub fn encode(allocator: *mem.Allocator, cmd: []const u8, req_num: i32, flags: Flags) ![]const u8 {
-    //     var out = try allocator.alloc(u8, cmd.len + RPCConnection.header_size);
-    //     var flag_byte: u8 = 0;
-    //     if (flags.stream) {
-    //         flag_byte |= 0b1000;
-    //     }
-    //     if (flags.end_err) {
-    //         flag_byte |= 0b0100;
-    //     }
-    //     switch (flags.body_type) {
-    //         BodyType.String => {
-    //             flag_byte |= 0b0001;
-    //         },
-    //         BodyType.JSON => {
-    //             flag_byte |= 0b0010;
-    //         },
-    //         BodyType.Binary => {},
-    //     }
-
-    //     out[0] = flag_byte;
-
-    //     // next 4 bytes are body length as a 32-bit BE uint
-    //     mem.writeIntBig(u32, out[1..5], @truncate(u32, cmd.len));
-    //     // next 4 bytes are request num as a 32-bit BE int
-    //     mem.writeIntBig(i32, out[5..9], req_num); // write the request number
-    //     mem.copy(u8, out[9..], cmd);
-
-    //     return out;
-    // }
-
-    // pub fn whoami(allocator: *mem.Allocator) ![]u8 {
-    //     var req = .{
-    //         .name = &[_][]const u8{"whoami"},
-    //         .type = "sync",
-    //         .args = &[_][]const u8{},
-    //     };
-
-    //     var str = std.ArrayList(u8).init(allocator);
-    //     try std.json.stringify(req, .{}, str.writer());
-
-    //     return str.toOwnedSlice();
-    // }
 }
