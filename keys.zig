@@ -11,7 +11,7 @@ pub const network_id = [_]u8{
 };
 
 pub const Keyfile = struct {
-    id: []const u8,
+    id: [53]u8,
     keypair: crypto.sign.Ed25519.KeyPair,
 
     pub fn parseKeyFile(allocator: *mem.Allocator, keyfile: []const u8) !Keyfile {
@@ -41,7 +41,7 @@ pub const Keyfile = struct {
 
         // json parse the result
         const FullKeyfile = struct {
-            id: []const u8,
+            id: [53]u8,
             curve: []const u8,
             public: []const u8,
             private: []const u8,

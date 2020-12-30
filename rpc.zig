@@ -86,6 +86,8 @@ pub const Message = struct {
     }
 };
 
+const goodbye_header = [_]u8{0} ** header_size;
+
 pub fn RPCConnection(comptime ReaderWriterType: type) type {
     return struct {
         // underlying file/connection
@@ -108,6 +110,11 @@ pub fn RPCConnection(comptime ReaderWriterType: type) type {
             const n = try self.conn.read(&header);
 
             if (n != header_size) {
+                return null;
+            }
+
+            if (mem.eql(u8, &header, &goodbye_header)) {
+                log.info("remote said goodbye", .{});
                 return null;
             }
 
@@ -141,6 +148,7 @@ pub fn RPCConnection(comptime ReaderWriterType: type) type {
         }
 
         pub fn writeMessage(self: *Self, msg: Message) !usize {
+            log.info("sending this message: {}", .{msg});
             var payload = std.ArrayList(u8).init(self.allocator);
             defer payload.deinit();
 

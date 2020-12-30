@@ -87,7 +87,7 @@ pub const BoxedConnection = struct {
             var enc_size = self.seal(chunk, &buf);
 
             written += try self.conn.write(buf[0..enc_size]);
-            log.info("wrote {} byte payload", .{written});
+            log.info("wrote {} byte payload: {x}", .{ written, buf[0..enc_size] });
         }
 
         return written;
@@ -132,7 +132,6 @@ pub const BoxedConnection = struct {
 
     // reads out next box (as many bytes as specified in the provided header)
     pub fn readNextBox(self: *BoxedConnection, header: Header, out: []u8) !usize {
-        log.info("will need {} bytes for this box; given {}", .{ header.msg_len, out.len });
         std.debug.assert(out.len >= header.msg_len);
 
         var sized_out = out[0..header.msg_len];
@@ -167,6 +166,7 @@ pub const BoxedConnection = struct {
         // and prepend it along with its own 16-byte auth tag
         // as the first 34-bytes in front of the original encrypted body
         crypto.nacl.SecretBox.seal(out[18 .. 18 + msg.len + 16], msg, body_nonce, self.session_keys.send_key);
+
         var tag: [18]u8 = undefined;
         mem.writeIntBig(u16, tag[0..2], @truncate(u16, msg.len));
         mem.copy(u8, tag[2..], out[18..34]);
