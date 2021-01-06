@@ -39,9 +39,12 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
-        // TODO send goodbye
         self.rpc_conn.goodbye() catch |err| {
             log.err("failed to cleanly close rpc connection: {}", .{err});
+        };
+
+        self.boxed_conn.goodbye() catch |err| {
+            log.err("failed to cleanly close box connection: {}", .{err});
         };
 
         self.conn.close();

@@ -17,6 +17,7 @@ pub const Header = struct {
 
 pub const header_size: usize = 34;
 pub const max_payload_size: usize = 4096;
+const goodbye_header = [_]u8{0} ** 18;
 
 pub const BoxedConnection = struct {
     const FifoType = std.fifo.LinearFifo(u8, std.fifo.LinearFifoBufferType{
@@ -31,6 +32,8 @@ pub const BoxedConnection = struct {
 
     // the underlying file/connection
     conn: fs.File,
+
+    goodbye_sent: bool = false,
 
     // orchestrates the handshake and saves session keys for future comms
     pub fn init(opts: HandshakeOptions, conn: fs.File) !BoxedConnection {
@@ -75,8 +78,25 @@ pub const BoxedConnection = struct {
         };
     }
 
+    pub fn goodbye(self: *BoxedConnection) !void {
+        log.info("sealing and sending goodbye message", .{});
+
+        var nonce: [24]u8 = undefined;
+        mem.copy(u8, &nonce, &self.session_keys.send_nonce);
+
+        var msg: [34]u8 = undefined;
+        crypto.nacl.SecretBox.seal(msg[0..], &goodbye_header, nonce, self.session_keys.send_key);
+
+        _ = try self.conn.write(&goodbye_header);
+
+        self.goodbye_sent = true;
+    }
+
     // splits up payload into 4096-byte chunks and sends them encrypted down the wire
     pub fn write(self: *BoxedConnection, payload: []const u8) !usize {
+        if (self.goodbye_sent) {
+            return error.GoodbyeAlreadySent;
+        }
         var buf: [header_size + max_payload_size]u8 = undefined;
 
         var written: usize = 0;
@@ -95,6 +115,9 @@ pub const BoxedConnection = struct {
 
     // will read as many bytes as possible into out
     pub fn read(self: *BoxedConnection, out: []u8) !usize {
+        if (self.goodbye_sent) {
+            return error.GoodbyeAlreadySent;
+        }
         var out_idx: usize = 0;
         while (out_idx < out.len) {
             const written = self.decrypted.read(out[out_idx..]);
@@ -118,6 +141,9 @@ pub const BoxedConnection = struct {
 
     // reads out next header, or returns null if there isn't one
     pub fn readNextHeader(self: *BoxedConnection) !?Header {
+        if (self.goodbye_sent) {
+            return error.GoodbyeAlreadySent;
+        }
         var header: [header_size]u8 = undefined;
         const n = try self.conn.read(&header);
 
@@ -132,6 +158,9 @@ pub const BoxedConnection = struct {
 
     // reads out next box (as many bytes as specified in the provided header)
     pub fn readNextBox(self: *BoxedConnection, header: Header, out: []u8) !usize {
+        if (self.goodbye_sent) {
+            return error.GoodbyeAlreadySent;
+        }
         std.debug.assert(out.len >= header.msg_len);
 
         var sized_out = out[0..header.msg_len];
