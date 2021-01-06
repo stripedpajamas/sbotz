@@ -94,6 +94,7 @@ pub fn RPCConnection(comptime ReaderWriterType: type) type {
         conn: *ReaderWriterType,
 
         allocator: *mem.Allocator,
+        goodbye_sent: bool = false,
 
         const Self = @This();
 
@@ -106,6 +107,9 @@ pub fn RPCConnection(comptime ReaderWriterType: type) type {
 
         // reads out next header, or returns null if there isn't one
         pub fn readNextHeader(self: Self) !?Header {
+            if (self.goodbye_sent) {
+                return error.GoodbyeAlreadySent;
+            }
             var header: [header_size]u8 = undefined;
             const n = try self.conn.read(&header);
 
@@ -125,6 +129,9 @@ pub fn RPCConnection(comptime ReaderWriterType: type) type {
 
         // caller owns returned body slice
         pub fn readNextMessage(self: *Self) !?Message {
+            if (self.goodbye_sent) {
+                return error.GoodbyeAlreadySent;
+            }
             var header = try self.readNextHeader();
 
             if (header) |h| {
@@ -148,6 +155,9 @@ pub fn RPCConnection(comptime ReaderWriterType: type) type {
         }
 
         pub fn writeMessage(self: *Self, msg: Message) !usize {
+            if (self.goodbye_sent) {
+                return error.GoodbyeAlreadySent;
+            }
             log.info("sending this message: {}", .{msg});
             var payload = std.ArrayList(u8).init(self.allocator);
             defer payload.deinit();
@@ -161,6 +171,13 @@ pub fn RPCConnection(comptime ReaderWriterType: type) type {
             try writer.writeAll(msg.body);
 
             return self.conn.write(payload.items);
+        }
+
+        pub fn goodbye(self: *Self) !void {
+            log.info("sending empty header to signal end", {});
+
+            _ = try self.conn.write(&goodbye_header);
+            self.goodbye_sent = true;
         }
     };
 }
