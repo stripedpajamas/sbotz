@@ -95,59 +95,64 @@ pub const Client = struct {
         }
     }
 
-    pub fn whoami(self: *Client, cb: Callback) !void {
-        const body = "{\"name\":[\"whoami\"],\"type\":\"sync\",\"args\":[]}";
+    pub fn call(self: *Client, name: []const u8, msg_type: MessageType, args: anytype, cb: Callback) !void {
         const rid = self.getRid();
+
+        var body = try createMessageBody(self.allocator, name, msg_type, args);
+        defer self.allocator.free(body);
 
         _ = try self.rpc_conn.writeMessage(rpc.Message{
             .header = rpc.Header{
                 .flags = .{
-                    .stream = false,
-                    .end_err = false,
-                    .body_type = rpc.Header.BodyType.JSON,
+                    .stream = msg_type == MessageType.source,
                 },
                 .body_len = body.len,
                 .req_num = rid,
             },
-            .body = body[0..],
-        });
-
-        try self.processResponse(rid, cb);
-    }
-
-    pub const HistoryStreamArgs = struct {
-        id: [53]u8,
-        seq: u32 = 0,
-        live: bool = false,
-    };
-
-    pub fn createHistoryStream(self: *Client, args: HistoryStreamArgs, cb: Callback) !void {
-        const body_head = "{\"name\":[\"createHistoryStream\"],\"type\":\"source\",\"args\":[";
-        const body_tail = "]}";
-
-        var body = std.ArrayList(u8).init(self.allocator);
-        defer body.deinit();
-
-        var writer = body.writer();
-        try writer.writeAll(body_head[0..]);
-        try std.json.stringify(args, .{}, writer);
-        try writer.writeAll(body_tail[0..]);
-
-        const rid = self.getRid();
-
-        _ = try self.rpc_conn.writeMessage(rpc.Message{
-            .header = rpc.Header{
-                .flags = .{
-                    .stream = true,
-                    .end_err = false,
-                    .body_type = rpc.Header.BodyType.JSON,
-                },
-                .body_len = body.items.len,
-                .req_num = rid,
-            },
-            .body = body.items,
+            .body = body,
         });
 
         try self.processResponse(rid, cb);
     }
 };
+
+pub const MessageType = enum {
+    source,
+    sync,
+    // async, // TODO how tf to do this kind
+
+    pub fn jsonStringify(value: MessageType, opts: std.json.StringifyOptions, out_stream: anytype) !void {
+        try out_stream.writeByte('"');
+        try out_stream.writeAll(@tagName(value));
+        try out_stream.writeByte('"');
+    }
+};
+
+pub fn Message(comptime args_type: type) type {
+    return struct {
+        name: [1][]const u8,
+        type: MessageType,
+        args: [1]args_type,
+
+        const Self = @This();
+
+        pub fn init(name: []const u8, msg_type: MessageType, args: args_type) Self {
+            return Self{
+                .name = [_][]const u8{name},
+                .type = msg_type,
+                .args = [_]args_type{args},
+            };
+        }
+    };
+}
+
+// caller owns returned string
+fn createMessageBody(allocator: *mem.Allocator, name: []const u8, msg_type: MessageType, args: anytype) ![]u8 {
+    var msg = Message(@TypeOf(args)).init(name, msg_type, args);
+    var body = std.ArrayList(u8).init(allocator);
+    errdefer body.deinit();
+
+    try std.json.stringify(msg, .{}, body.writer());
+
+    return body.toOwnedSlice();
+}

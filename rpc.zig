@@ -16,8 +16,8 @@ pub const Header = struct {
 
     pub const Flags = struct {
         stream: bool,
-        end_err: bool,
-        body_type: BodyType,
+        end_err: bool = false,
+        body_type: BodyType = BodyType.JSON,
     };
 
     flags: Flags,

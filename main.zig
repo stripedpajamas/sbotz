@@ -36,7 +36,7 @@ pub fn main() !void {
     });
     defer client.deinit();
 
-    try client.createHistoryStream(.{
+    try client.call("createHistoryStream", ssb.MessageType.source, .{
         .id = keyfile.id,
     }, printMsg);
 }
