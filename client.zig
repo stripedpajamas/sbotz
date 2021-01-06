@@ -95,7 +95,7 @@ pub const Client = struct {
         }
     }
 
-    pub fn call(self: *Client, name: []const u8, msg_type: MessageType, args: anytype, cb: Callback) !void {
+    pub fn call(self: *Client, name: []const []const u8, msg_type: MessageType, args: anytype, cb: Callback) !void {
         const rid = self.getRid();
 
         var body = try createMessageBody(self.allocator, name, msg_type, args);
@@ -130,15 +130,15 @@ pub const MessageType = enum {
 
 pub fn Message(comptime args_type: type) type {
     return struct {
-        name: [1][]const u8,
+        name: []const []const u8,
         type: MessageType,
         args: [1]args_type,
 
         const Self = @This();
 
-        pub fn init(name: []const u8, msg_type: MessageType, args: args_type) Self {
+        pub fn init(name: []const []const u8, msg_type: MessageType, args: args_type) Self {
             return Self{
-                .name = [_][]const u8{name},
+                .name = name,
                 .type = msg_type,
                 .args = [_]args_type{args},
             };
@@ -147,7 +147,7 @@ pub fn Message(comptime args_type: type) type {
 }
 
 // caller owns returned string
-fn createMessageBody(allocator: *mem.Allocator, name: []const u8, msg_type: MessageType, args: anytype) ![]u8 {
+fn createMessageBody(allocator: *mem.Allocator, name: []const []const u8, msg_type: MessageType, args: anytype) ![]u8 {
     var msg = Message(@TypeOf(args)).init(name, msg_type, args);
     var body = std.ArrayList(u8).init(allocator);
     errdefer body.deinit();
