@@ -19,9 +19,8 @@ pub const Client = struct {
     request_id: i32 = 1,
     allocator: *mem.Allocator,
 
-    // callbacks return a bool indicating whether or not the values can be freed
-    pub const Callback = fn (value: []const u8) bool;
-    pub const StreamCallback = fn (value: []const u8, end: bool) bool;
+    // callback returns a bool indicating whether or not the values can be freed
+    pub const Callback = fn (value: []const u8, end_err: bool) bool;
 
     pub fn init(allocator: *mem.Allocator, opts: shs.HandshakeOptions) !Client {
         var server_addr = try net.Address.parseIp4("127.0.0.1", 8008);
@@ -53,32 +52,15 @@ pub const Client = struct {
     fn processResponse(self: *Client, rid: i32, cb: Callback) !void {
         while (try self.rpc_conn.readNextMessage()) |msg| {
             if (msg.header.req_num == -1 * rid) {
-                var should_free = cb(msg.body);
-                if (should_free) {
-                    self.allocator.free(msg.body);
-                }
-                if (msg.header.flags.end_err) {
-                    return;
-                }
-            } else {
-                // discard everything but the stuff we want
-                self.allocator.free(msg.body);
-            }
-        }
-    }
-
-    fn processStreamResponse(self: *Client, rid: i32, cb: StreamCallback) !void {
-        while (try self.rpc_conn.readNextMessage()) |msg| {
-            if (msg.header.req_num == -1 * rid) {
-                if (msg.header.flags.end_err) {
-                    // if this is the end of the line, say goodbye
-                    try self.goodbye(msg);
-                    return;
-                }
-
                 var should_free = cb(msg.body, msg.header.flags.end_err);
                 if (should_free) {
                     self.allocator.free(msg.body);
+                }
+
+                if (msg.header.flags.end_err) {
+                    // if this is the end of the line, say goodbye
+                    try self.goodbye(msg);
+                    break;
                 }
             } else {
                 // discard everything but the stuff we want
@@ -132,7 +114,7 @@ pub const Client = struct {
         live: bool = false,
     };
 
-    pub fn createHistoryStream(self: *Client, args: HistoryStreamArgs, cb: StreamCallback) !void {
+    pub fn createHistoryStream(self: *Client, args: HistoryStreamArgs, cb: Callback) !void {
         const body_head = "{\"name\":[\"createHistoryStream\"],\"type\":\"source\",\"args\":[";
         const body_tail = "]}";
 
@@ -159,6 +141,6 @@ pub const Client = struct {
             .body = body.items,
         });
 
-        try self.processStreamResponse(rid, cb);
+        try self.processResponse(rid, cb);
     }
 };

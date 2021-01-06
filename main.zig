@@ -6,11 +6,13 @@ var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 
 pub const log_level: std.log.Level = .warn;
 
-fn printMsg(value: []const u8, end: bool) bool {
+fn printMsg(value: []const u8, end_err: bool) bool {
     const stdout = std.io.getStdOut().writer();
-    stdout.print("{}\n", .{value}) catch |err| {
-        std.log.err("failed to write output: {}", .{err});
-    };
+    if (!end_err) {
+        stdout.print("{}\n", .{value}) catch |err| {
+            std.log.err("failed to write output: {}", .{err});
+        };
+    }
     return true;
 }
 
