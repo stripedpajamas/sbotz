@@ -174,7 +174,7 @@ pub fn RPCConnection(comptime ReaderWriterType: type) type {
         }
 
         pub fn goodbye(self: *Self) !void {
-            log.info("sending empty header to signal end", {});
+            log.info("sending empty header to signal end", .{});
 
             _ = try self.conn.write(&goodbye_header);
             self.goodbye_sent = true;
