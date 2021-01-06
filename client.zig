@@ -44,7 +44,7 @@ pub const Client = struct {
         self.conn.close();
     }
 
-    pub fn get_rid(self: *Client) i32 {
+    pub fn getRid(self: *Client) i32 {
         var val = self.request_id;
         self.request_id += 1;
         return val;
@@ -70,12 +70,15 @@ pub const Client = struct {
     fn processStreamResponse(self: *Client, rid: i32, cb: StreamCallback) !void {
         while (try self.rpc_conn.readNextMessage()) |msg| {
             if (msg.header.req_num == -1 * rid) {
+                if (msg.header.flags.end_err) {
+                    // if this is the end of the line, say goodbye
+                    try self.goodbye(msg);
+                    return;
+                }
+
                 var should_free = cb(msg.body, msg.header.flags.end_err);
                 if (should_free) {
                     self.allocator.free(msg.body);
-                }
-                if (msg.header.flags.end_err) {
-                    return;
                 }
             } else {
                 // discard everything but the stuff we want
@@ -84,9 +87,28 @@ pub const Client = struct {
         }
     }
 
+    pub fn goodbye(self: *Client, original: ?rpc.Message) !void {
+        const body = "true";
+
+        if (original) |orig| {
+            _ = try self.rpc_conn.writeMessage(rpc.Message{
+                .header = rpc.Header{
+                    .flags = .{
+                        .stream = orig.header.flags.stream,
+                        .end_err = true,
+                        .body_type = rpc.Header.BodyType.JSON,
+                    },
+                    .body_len = body.len,
+                    .req_num = -1 * orig.header.req_num,
+                },
+                .body = body[0..],
+            });
+        }
+    }
+
     pub fn whoami(self: *Client, cb: Callback) !void {
         const body = "{\"name\":[\"whoami\"],\"type\":\"sync\",\"args\":[]}";
-        const rid = self.get_rid();
+        const rid = self.getRid();
 
         _ = try self.rpc_conn.writeMessage(rpc.Message{
             .header = rpc.Header{
@@ -122,7 +144,7 @@ pub const Client = struct {
         try std.json.stringify(args, .{}, writer);
         try writer.writeAll(body_tail[0..]);
 
-        const rid = self.get_rid();
+        const rid = self.getRid();
 
         _ = try self.rpc_conn.writeMessage(rpc.Message{
             .header = rpc.Header{
