@@ -36,7 +36,7 @@ pub fn main() !void {
     });
     defer client.deinit();
 
-    try client.call(&[_][]const u8{"createHistoryStream"}, ssb.MessageType.source, .{
-        .id = keyfile.id,
+    try client.call(&[_][]const u8{"createLogStream"}, ssb.MessageType.source, .{
+        .live = true,
     }, printMsg);
 }

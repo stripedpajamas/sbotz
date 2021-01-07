@@ -141,6 +141,10 @@ pub fn RPCConnection(comptime ReaderWriterType: type) type {
                 const n = try self.conn.read(out);
 
                 if (n != out.len) {
+                    log.err("received {} bytes instead of the {} expectation", .{
+                        n,
+                        h.body_len,
+                    });
                     return error.EndOfStream;
                 }
 

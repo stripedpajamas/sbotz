@@ -168,6 +168,10 @@ pub const BoxedConnection = struct {
         const n = try self.conn.read(sized_out);
         if (n != sized_out.len) {
             // could not read full body
+            log.err("received {} bytes instead of the {} expectation", .{
+                n,
+                header.msg_len,
+            });
             return error.EndOfStream;
         }
 
